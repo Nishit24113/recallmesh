@@ -23,4 +23,8 @@ interface IDisputeModule {
 
     /// @notice True once the dispute for `recallId` has been resolved (or window passed).
     function isResolved(uint256 recallId) external view returns (bool);
+
+    /// @notice True if the recall attribution stands (resolved-upheld, or auto-upheld
+    ///         when the window elapsed with no challenge); false if overturned.
+    function isUpheld(uint256 recallId) external view returns (bool);
 }

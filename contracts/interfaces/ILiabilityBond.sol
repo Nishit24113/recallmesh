@@ -11,6 +11,7 @@ interface ILiabilityBond {
     event BondStaked(address indexed actor, uint256 amount);
     event BondWithdrawn(address indexed actor, uint256 amount);
     event BondSlashed(address indexed actor, uint256 amount, uint256 indexed recallId);
+    event BondRefunded(address indexed actor, uint256 amount, uint256 indexed recallId);
     event PayoutDistributed(uint256 indexed recallId, uint256 totalAmount, uint256 recipients);
 
     /// @notice Stake (increase) the caller's liability bond.
@@ -33,4 +34,8 @@ interface ILiabilityBond {
     /// @param weights relative weights (e.g. quarantined quantity held) per holder
     function distributePayout(uint256 recallId, address[] calldata holders, uint256[] calldata weights)
         external;
+
+    /// @notice Return a recall's escrow to the (wrongly) accused actor's bond when a
+    ///         dispute overturns the attribution. Restricted to the RecallEngine.
+    function refundEscrow(uint256 recallId, address to) external returns (uint256 amount);
 }

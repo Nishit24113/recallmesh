@@ -16,6 +16,9 @@ module.exports = {
     version: "0.8.24",
     settings: {
       optimizer: { enabled: true, runs: 200 },
+      // OpenZeppelin v5.1+ uses the `mcopy` opcode; target Cancun (supported by
+      // local Hardhat and Polygon Amoy).
+      evmVersion: "cancun",
     },
   },
   networks: {

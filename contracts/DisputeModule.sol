@@ -87,4 +87,11 @@ contract DisputeModule is IDisputeModule, Ownable {
         if (d.resolved) return true;
         return d.deadline != 0 && block.timestamp > d.deadline && !d.challenged;
     }
+
+    /// @inheritdoc IDisputeModule
+    function isUpheld(uint256 recallId) external view returns (bool) {
+        Dispute storage d = _disputes[recallId];
+        if (d.resolved) return d.upheld;              // arbiter ruling
+        return d.deadline != 0 && block.timestamp > d.deadline && !d.challenged; // auto-upheld
+    }
 }

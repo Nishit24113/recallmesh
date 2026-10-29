@@ -113,11 +113,16 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
         uint256[] calldata weights
     ) external {
         Recall storage r = _recalls[recallId];
-        require(r.state == RecallState.Initiated || r.state == RecallState.Disputed, "bad state");
+        require(r.state == RecallState.Initiated, "bad state");
         require(disputes.isResolved(recallId), "dispute unresolved");
-        // TODO: if the dispute overturned the attribution, refund the slashed bond to
-        //       the (wrongly) accused actor instead of distributing to holders.
-        bond.distributePayout(recallId, holders, weights);
+
+        if (disputes.isUpheld(recallId)) {
+            // Attribution stands: pay the slashed collateral to downstream holders.
+            bond.distributePayout(recallId, holders, weights);
+        } else {
+            // Attribution overturned on dispute: refund the slashed bond to the accused.
+            bond.refundEscrow(recallId, r.atFaultActor);
+        }
         r.state = RecallState.Finalized;
         emit RecallFinalized(recallId, r.slashed);
     }

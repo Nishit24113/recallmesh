@@ -3,10 +3,11 @@
 **A blockchain supply-chain provenance system with collateralized, topology-aware recall liability.**
 CSE 540 — Engineering Blockchain Applications (Fall B 2026), Project Group 12.
 
-> **Status: Smart Contract Design Draft (Deliverable 2).** This repository establishes the
-> repository structure, contract interfaces, function signatures, and documented logic. Some
-> functionality is intentionally incomplete and marked with `TODO`; full implementation,
-> tests, and a UI follow in later milestones.
+> **Status.** The Deliverable-2 design draft (structure, interfaces, documented logic) is in
+> place, and the **core recall flow is now implemented and tested end-to-end** (9 passing tests)
+> with a **gas/scalability benchmark** and a runnable **demo**. Still to come in later milestones:
+> the React/Ethers.js UI, off-chain oracle/IPFS wiring, and the remaining `TODO`s (Merkle-scaling
+> for very large graphs, bond-sizing policy).
 
 ## What it does
 
@@ -46,9 +47,14 @@ contracts/
   LiabilityBond.sol
   RecallEngine.sol
   DisputeModule.sol
-scripts/deploy.js    deploys and wires all five contracts
-test/                Hardhat test skeleton (expands in later milestones)
-docs/                architecture notes + diagram
+scripts/
+  deploy.js          deploys and wires all five contracts
+  demo.js            end-to-end demo (build DAG -> recall -> quarantine -> payout)
+  benchmark.js       gas/scalability benchmark for ONE DAG config (CONFIG_INDEX)
+  aggregate.js       merges benchmark results into CSV + a Markdown table
+test/                Hardhat tests (recall flow, EIP-712, slashing, dispute)
+bench/               benchmark configs + SLURM array job for ASU SOL
+docs/                architecture notes + diagram + benchmark results
 ```
 
 ## Dependencies & setup
@@ -60,8 +66,22 @@ docs/                architecture notes + diagram
 ```bash
 npm install          # install dependencies
 npx hardhat compile  # compile the contracts
-npx hardhat test     # run the test skeleton
+npx hardhat test     # run the test suite (9 passing)
+npx hardhat run scripts/demo.js   # run the end-to-end demo
 ```
+
+### Benchmarks (gas vs. DAG size)
+
+```bash
+# local sweep over all configs, then merge:
+for i in $(seq 0 9); do CONFIG_INDEX=$i npx hardhat run scripts/benchmark.js; done
+node scripts/aggregate.js         # -> bench/results/summary.csv + docs/benchmark_results.md
+# on ASU SOL (parallel SLURM array, one config per task):
+sbatch bench/run_benchmark.sbatch
+```
+
+See [`bench/README.md`](bench/README.md) and the committed results in
+[`docs/benchmark_results.md`](docs/benchmark_results.md).
 
 ## Deploy (local)
 

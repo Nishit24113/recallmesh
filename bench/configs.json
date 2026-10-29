@@ -1,0 +1,12 @@
+[
+  { "label": "chain-d5",  "fanout": 1, "depth": 5 },
+  { "label": "chain-d10", "fanout": 1, "depth": 10 },
+  { "label": "chain-d20", "fanout": 1, "depth": 20 },
+  { "label": "bin-d2",    "fanout": 2, "depth": 2 },
+  { "label": "bin-d3",    "fanout": 2, "depth": 3 },
+  { "label": "bin-d4",    "fanout": 2, "depth": 4 },
+  { "label": "tri-d2",    "fanout": 3, "depth": 2 },
+  { "label": "tri-d3",    "fanout": 3, "depth": 3 },
+  { "label": "quad-d2",   "fanout": 4, "depth": 2 },
+  { "label": "quad-d3",   "fanout": 4, "depth": 3 }
+]

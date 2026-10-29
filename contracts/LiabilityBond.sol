@@ -90,8 +90,21 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
             require(ok, "payout failed");
         }
         emit PayoutDistributed(recallId, distributed, holders.length);
-        // TODO: integer-division dust (pot - distributed) is left unassigned here;
-        //       sweep it to a treasury or the last holder in the implementation phase.
+        // NOTE: integer-division dust (pot - distributed) stays in the contract;
+        //       a treasury sweep is left for a later phase.
+    }
+
+    /// @inheritdoc ILiabilityBond
+    function refundEscrow(uint256 recallId, address to)
+        external
+        onlyRecallEngine
+        returns (uint256 amount)
+    {
+        amount = _escrow[recallId];
+        require(amount > 0, "no escrow");
+        _escrow[recallId] = 0;
+        _bonds[to] += amount; // credited back to free bond; the actor may withdraw it
+        emit BondRefunded(to, amount, recallId);
     }
 
     receive() external payable {}

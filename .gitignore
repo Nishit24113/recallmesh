@@ -7,3 +7,8 @@ typechain-types/
 .env
 *.log
 .DS_Store
+
+# benchmark raw outputs (keep docs/benchmark_results.md committed)
+bench/results/result_*.json
+bench/results/summary.csv
+bench/results/slurm_*
