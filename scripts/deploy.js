@@ -7,6 +7,8 @@
  * deployment these would be distinct consortium/regulator keys.
  */
 const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners();
@@ -49,6 +51,25 @@ async function main() {
   console.log("LiabilityBond:", await LiabilityBond.getAddress());
   console.log("DisputeModule:", await DisputeModule.getAddress());
   console.log("RecallEngine: ", engine);
+
+  // Write addresses into the UI so the frontend can connect without manual edits.
+  const net = await hre.ethers.provider.getNetwork();
+  const deployments = {
+    chainId: Number(net.chainId),
+    rpcUrl: "http://127.0.0.1:8545",
+    ActorRegistry: await ActorRegistry.getAddress(),
+    LotRegistry: await LotRegistry.getAddress(),
+    LiabilityBond: await LiabilityBond.getAddress(),
+    DisputeModule: await DisputeModule.getAddress(),
+    RecallEngine: engine,
+  };
+  const uiFile = path.join(__dirname, "..", "ui", "src", "deployments.json");
+  try {
+    fs.writeFileSync(uiFile, JSON.stringify(deployments, null, 2) + "\n");
+    console.log("Wrote UI deployments ->", uiFile);
+  } catch (e) {
+    console.log("(UI deployments not written:", e.message, ")");
+  }
 }
 
 main().catch((e) => {
