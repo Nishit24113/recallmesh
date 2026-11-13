@@ -107,5 +107,18 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
         emit BondRefunded(to, amount, recallId);
     }
 
+    /// @inheritdoc ILiabilityBond
+    function payFromEscrow(uint256 recallId, address to, uint256 amount)
+        external
+        onlyRecallEngine
+        nonReentrant
+    {
+        require(_escrow[recallId] >= amount, "escrow underflow");
+        _escrow[recallId] -= amount; // effects before interaction
+        (bool ok, ) = to.call{value: amount}("");
+        require(ok, "pay failed");
+        emit ClaimPaid(recallId, to, amount);
+    }
+
     receive() external payable {}
 }

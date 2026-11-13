@@ -13,6 +13,7 @@ interface ILiabilityBond {
     event BondSlashed(address indexed actor, uint256 amount, uint256 indexed recallId);
     event BondRefunded(address indexed actor, uint256 amount, uint256 indexed recallId);
     event PayoutDistributed(uint256 indexed recallId, uint256 totalAmount, uint256 recipients);
+    event ClaimPaid(uint256 indexed recallId, address indexed to, uint256 amount);
 
     /// @notice Stake (increase) the caller's liability bond.
     function stakeBond() external payable;
@@ -38,4 +39,8 @@ interface ILiabilityBond {
     /// @notice Return a recall's escrow to the (wrongly) accused actor's bond when a
     ///         dispute overturns the attribution. Restricted to the RecallEngine.
     function refundEscrow(uint256 recallId, address to) external returns (uint256 amount);
+
+    /// @notice Pull-based payout: send `amount` from a recall's escrow to a single holder
+    ///         (used by the Merkle claim path). Restricted to the RecallEngine.
+    function payFromEscrow(uint256 recallId, address to, uint256 amount) external;
 }

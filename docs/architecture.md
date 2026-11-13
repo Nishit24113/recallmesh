@@ -34,9 +34,14 @@
 
 ## Draft-stage limitations / planned work
 
-- **Traversal gas.** `affectedDescendants` is a bounded BFS (`maxNodes` cap); it is O(n²) in the
-  result size because a `view` cannot use a storage visited-set. For large graphs we plan a
-  **Merkle-membership** proof of the affected set instead of on-chain traversal.
+- **Traversal gas — addressed.** The eager `affectedDescendants` BFS is O(n²) in the result size
+  (a `view` cannot keep a storage visited-set), so on-chain traversal + quarantine of a large
+  affected set is expensive and eventually exceeds the block gas limit. This is now solved by the
+  **Merkle-anchored recall path**: the affected set and payout table are committed as Merkle roots,
+  so `initiateRecallMerkle` is O(1) (~326K gas, constant), and quarantine/payout are O(log n)
+  per-lot membership proofs that anyone can submit (pull-based). See
+  [`merkle_results.md`](merkle_results.md) for the eager-vs-Merkle gas numbers. The eager path is
+  kept for small graphs and for the one-transaction demo.
 - **Bond sizing.** `slashAmount` is a placeholder; the report will analyze incentive-compatible
   bond sizing (bonds vs. real recall liability).
 - **Dispute outcome.** `finalizeRecall` currently always pays out; if a dispute overturns the

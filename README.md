@@ -3,11 +3,13 @@
 **A blockchain supply-chain provenance system with collateralized, topology-aware recall liability.**
 CSE 540 — Engineering Blockchain Applications (Fall B 2026), Project Group 12.
 
-> **Status.** The Deliverable-2 design draft (structure, interfaces, documented logic) is in
-> place, and the **core recall flow is now implemented and tested end-to-end** (9 passing tests)
-> with a **gas/scalability benchmark** and a runnable **demo**. Still to come in later milestones:
-> the React/Ethers.js UI, off-chain oracle/IPFS wiring, and the remaining `TODO`s (Merkle-scaling
-> for very large graphs, bond-sizing policy).
+> **Status.** The core recall flow is implemented and tested end-to-end (**12 passing tests**),
+> with a runnable demo, a React/Ethers.js UI, and a gas benchmark. The earlier scalability
+> limitation is now **solved**: alongside the eager on-chain-traversal path there is a
+> **Merkle-anchored recall** whose initiation is *O(1)* (constant ~326K gas vs. 2.16M and climbing
+> for the eager path at 84 affected lots), with lazy per-lot quarantine and **pull-based** pro-rata
+> claims via membership proofs — see [`docs/merkle_results.md`](docs/merkle_results.md). Still to
+> come: real off-chain oracle/IPFS wiring, a public-testnet deployment, and bond-sizing analysis.
 
 ## What it does
 
@@ -52,6 +54,8 @@ scripts/
   demo.js            end-to-end demo (build DAG -> recall -> quarantine -> payout)
   benchmark.js       gas/scalability benchmark for ONE DAG config (CONFIG_INDEX)
   aggregate.js       merges benchmark results into CSV + a Markdown table
+  merkle.js          off-chain Merkle helpers (quarantine + payout trees/proofs)
+  benchmark_merkle.js  eager-vs-Merkle recall gas comparison -> docs/merkle_results.md
 test/                Hardhat tests (recall flow, EIP-712, slashing, dispute)
 bench/               benchmark configs + SLURM array job for ASU SOL
 docs/                architecture notes + diagram + benchmark results
