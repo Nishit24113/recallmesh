@@ -157,7 +157,7 @@ export default function App() {
           } catch {}
         }
       }
-      const affected = (await lotReg.affectedDescendants(root, MAX_NODES)).map(Number);
+      const affected = (await lotReg.affectedDescendants(root, MAX_NODES)).map(Number).sort((a, b) => a - b);
       setLastRecall({ id: recallId, root, atFault, affected, slashed, payouts: null });
       say("Quarantined " + affected.length + " downstream lot(s); slashed " + ethers.formatEther(slashed) + " ETH", "ok");
     } catch (e) {
