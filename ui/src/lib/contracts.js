@@ -15,12 +15,14 @@ export const ABIS = {
     "function createLot(uint256[] parents, uint256 amount, string metadataURI) returns (uint256)",
     "function getLot(uint256) view returns (tuple(uint256 id,address producer,address custodian,uint8 status,uint256[] parents,string metadataURI,uint256 createdAt))",
     "function affectedDescendants(uint256,uint256) view returns (uint256[])",
+    "function balanceOf(address account, uint256 id) view returns (uint256)",
     "event LotCreated(uint256 indexed lotId, address indexed producer, uint256[] parents)",
     "event LotStatusChanged(uint256 indexed lotId, uint8 status)",
   ],
   LiabilityBond: [
     "function stakeBond() payable",
     "function bondOf(address) view returns (uint256)",
+    "event BondSlashed(address indexed actor, uint256 amount, uint256 indexed recallId)",
   ],
   DisputeModule: ["function resolveDispute(uint256 recallId, bool upheld)"],
   RecallEngine: [
@@ -47,6 +49,13 @@ export async function signRecall(signer, engineAddress, chainId, rootLotId, atFa
   return signer.signTypedData(domain, types, { rootLotId, atFaultActor, maxNodes });
 }
 
+// shortcut: the product name rides in the lot's metadataURI query string; swap for real IPFS JSON metadata later.
+export const lotMetadataURI = (name) => "ipfs://demo" + (name ? "?name=" + encodeURIComponent(name) : "");
+export const lotName = (uri = "") => {
+  const m = uri.match(/[?&]name=([^&]*)/);
+  return m ? decodeURIComponent(m[1]) : "";
+};
+
 // Generate react-flow nodes/edges from on-chain lot data, auto-laid-out by DAG depth.
 export function buildGraph(lots) {
   const map = new Map(lots.map((l) => [l.id, l]));
@@ -69,15 +78,17 @@ export function buildGraph(lots) {
     arr.forEach((l, i) => {
       nodes.push({
         id: String(l.id),
-        position: { x: i * 190 + 30, y: Number(lvl) * 130 + 20 },
-        data: { label: `L${l.id} · ${ROLE[l.role] || "?"}\n${STATUS[l.status]}` },
+        position: { x: i * 220 + 30, y: Number(lvl) * 140 + 20 },
+        data: { label: `L${l.id}${lotName(l.metadataURI) ? " · " + lotName(l.metadataURI) : ""}\n${ROLE[l.role] || "?"} · ${STATUS[l.status]}` },
         style: {
           background: STATUS_COLOR[l.status],
           color: "white",
           border: "1px solid rgba(255,255,255,.25)",
-          borderRadius: 8,
-          fontSize: 12,
-          width: 150,
+          borderRadius: 10,
+          fontSize: 14,
+          fontWeight: 600,
+          padding: 10,
+          width: 190,
           whiteSpace: "pre-line",
           textAlign: "center",
         },
