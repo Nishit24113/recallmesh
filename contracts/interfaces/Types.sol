@@ -30,8 +30,14 @@ enum LotStatus {
 enum RecallState {
     None,
     Initiated, // affected set computed + quarantined, bond slashed into escrow
-    Disputed,  // an accused actor has opened a challenge
-    Finalized  // challenge window closed, pro-rata payout distributed
+    Disputed,  // reserved: challenge status is tracked in DisputeModule
+    Finalized  // dispute resolved; escrow paid out (eager) or refunded (overturned)
+}
+
+/// @notice How a recall computes and settles its affected set.
+enum RecallMode {
+    Eager,  // on-chain DAG traversal; payouts computed on-chain at finalize
+    Merkle  // oracle commits Merkle roots; quarantine + payout claimed by proof
 }
 
 /// @notice A production lot and its position in the provenance DAG.
@@ -51,8 +57,10 @@ struct Lot {
 struct Recall {
     uint256 id;
     uint256 rootLotId;     // the defect-root lot
-    address atFaultActor;  // actor slashed for the defect (by lineage position)
+    address atFaultActor;  // producer of the root lot (derived on-chain from the DAG)
     RecallState state;
+    RecallMode mode;
     uint256 initiatedAt;
     uint256 slashed;       // amount moved into escrow for downstream payout
+    string certificateCID; // IPFS CID of the lab certificate that justified the recall
 }
