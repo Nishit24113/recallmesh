@@ -14,3 +14,12 @@ typechain-types/
 bench/results/result_*.json
 bench/results/summary.csv
 bench/results/slurm_*
+
+# off-chain service state (local IPFS cache, saved Merkle trees)
+offchain/.ipfs-cache/
+offchain/.recalls/
+
+# per-machine deployments; testnet actor keys must never be committed
+deployments/hardhat.json
+deployments/localhost.json
+deployments/*-actors.json
