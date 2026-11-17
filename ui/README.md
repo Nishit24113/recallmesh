@@ -1,37 +1,39 @@
 # RecallMesh UI
 
-A React + Ethers.js + React-Flow frontend for RecallMesh. The provenance graph is
-**built dynamically from on-chain `LotCreated` events** (no hardcoded nodes),
-auto-laid-out by DAG depth, and recoloured live as a recall propagates
-(green = active, amber = quarantined, red = recalled).
+React + Ethers.js + React Flow frontend for RecallMesh. All state is read from the chain: the
+provenance graph comes from `LotRegistry`, lot names come from each lot's IPFS metadata, and the
+settlement ledger is rebuilt from contract events. Nothing is hardcoded.
 
-## Features
-- Connect a wallet (MetaMask) or fall back to a read-only local RPC connection.
-- Register actors, stake liability bonds, and create lots (building the provenance DAG).
-- Visualize the DAG; trigger a recall (signs the EIP-712 message in the wallet, calls
-  `initiateRecall`) and watch the affected descendants quarantine.
-- Resolve the dispute (arbiter, demo convenience) and pay downstream holders pro-rata.
+## Panels
+
+- **Left: setup.** Register actors (admin), stake or withdraw bond, create lots (metadata goes to
+  IPFS via the oracle service; the form shows how much bond the lot will lock), move custody.
+- **Centre: provenance graph.** Laid out by DAG depth and coloured by status (green active, amber
+  quarantined, red recalled; roots are outlined). A recall replays as a wave, layer by layer from
+  the root.
+- **Centre: settlement ledger.** A live table of stakes, locks, slashes, refunds, payouts,
+  challenges and rulings, with explorer links on Amoy.
+- **Right: lab result → recall.** Pick a lot, a test and pass/fail, then choose Eager or Merkle
+  mode. The oracle publishes the certificate and signs the recall, and your wallet submits it.
+  Merkle quarantine proofs are relayed by the oracle.
+- **Right: dispute & settlement.** The accused can challenge (evidence goes to IPFS). The arbiter
+  can uphold or overturn. On a local chain there is a "Skip challenge window" button. Then
+  finalize (eager payout or refund), or claim / relay all claims (Merkle).
 
 ## Run it
 
-From the repo root, start a local chain and deploy (this writes the contract addresses
-into `ui/src/deployments.json` automatically):
+From the repo root (see the main README for details):
 
 ```bash
-npx hardhat node                                       # terminal 1
-npx hardhat run scripts/deploy.js --network localhost  # terminal 2
+npx hardhat node
+npm run deploy:local && npm run seed:local
+npm run oracle
+cd ui && npm install && npm run dev
 ```
 
-Then start the UI:
+Connect MetaMask to `http://127.0.0.1:8545` (chain id `31337`) and import Hardhat account #0
+(admin and arbiter), or #3 to act as the farm.
 
-```bash
-cd ui
-npm install
-npm run dev        # open the printed localhost URL
-```
-
-Connect MetaMask to the local network (RPC `http://127.0.0.1:8545`, chain id `31337`) and
-import a Hardhat test account to sign transactions.
-
-The graph layout is derived from the on-chain lineage (each lot's parent links), so the view
-always reflects the current ledger state with no hardcoded topology.
+`src/deployments.json` is written by `scripts/deploy.js`. It holds the contract addresses, RPC,
+explorer, oracle URL and deploy block. A credited payout (one whose transfer was rejected) shows
+as a "Withdraw … credited" button in the top bar.
