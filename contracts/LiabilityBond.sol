@@ -7,29 +7,74 @@ import {ILiabilityBond} from "./interfaces/ILiabilityBond.sol";
 
 /**
  * @title LiabilityBond
- * @notice Neutral custodian of each actor's staked collateral. On a recall, only
- *         the RecallEngine may slash an actor's bond into a per-recall escrow and
- *         later distribute that escrow pro-rata to downstream holders. Because the
- *         contract (not any party) holds the funds, settlement is impartial.
- * @dev Draft: bond sizing, partial slashing policy, and division dust handling are
- *      left as parameters/TODOs for the implementation phase.
+ * @notice Neutral custodian of each actor's staked collateral.
+ *
+ *  - **Throughput-sized locks.** Creating a lot locks `bondPerUnit * quantity` of the
+ *    producer's free bond for `liabilityPeriod`. An actor therefore cannot produce more
+ *    than its bond covers, and cannot withdraw collateral backing lots that could still
+ *    be recalled (closing the "withdraw before the recall lands" escape).
+ *  - **Topology-keyed slashing.** A recall slashes the lock posted for the recalled root
+ *    lot, so the penalty scales with the size of the defective lot.
+ *  - **Settlement.** Escrow is paid pro-rata to downstream holders. A holder whose
+ *    address rejects ETH is credited (pull) instead of blocking everyone else, and the
+ *    last recipient absorbs integer-division dust so the whole pot is paid out.
  */
 contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
-    address public recallEngine;
+    struct LotLock {
+        address owner;
+        uint256 size;      // original lock (bondPerUnit * quantity at creation)
+        uint256 remaining; // not yet released or slashed
+        uint256 unlockAt;
+    }
 
-    mapping(address => uint256) private _bonds;  // free (withdrawable) bond per actor
-    mapping(uint256 => uint256) private _escrow; // recallId => amount held for payout
+    /// @dev Gas forwarded on payout transfers: enough for smart-wallet receive hooks,
+    ///      not enough for a malicious holder to grief the whole settlement.
+    uint256 private constant PAYOUT_GAS = 50_000;
+
+    address public recallEngine;
+    address public lotRegistry;
+    uint256 public bondPerUnit;               // collateral required per unit produced
+    uint256 public liabilityPeriod = 30 days; // how long a lot's lock backs a recall
+
+    mapping(address => uint256) private _bonds;       // free (withdrawable) bond per actor
+    mapping(address => uint256) private _lockedTotal; // locked bond per actor
+    mapping(uint256 => LotLock) private _locks;       // lotId => lock
+    mapping(uint256 => uint256) private _escrow;      // recallId => amount held for payout
+    mapping(address => uint256) private _claimable;   // credited payouts (failed pushes)
 
     modifier onlyRecallEngine() {
         require(msg.sender == recallEngine, "only RecallEngine");
         _;
     }
 
+    modifier onlyLotRegistry() {
+        require(msg.sender == lotRegistry, "only LotRegistry");
+        _;
+    }
+
     constructor(address owner_) Ownable(owner_) {}
+
+    // --- admin wiring / parameters ---
 
     function setRecallEngine(address engine) external onlyOwner {
         recallEngine = engine;
     }
+
+    function setLotRegistry(address registry) external onlyOwner {
+        lotRegistry = registry;
+    }
+
+    /// @notice Collateral per unit produced. Applies to lots created after the change.
+    function setBondPerUnit(uint256 amount) external onlyOwner {
+        bondPerUnit = amount;
+    }
+
+    /// @notice Liability period for lots created after the change.
+    function setLiabilityPeriod(uint256 period) external onlyOwner {
+        liabilityPeriod = period;
+    }
+
+    // --- staking ---
 
     /// @inheritdoc ILiabilityBond
     function stakeBond() external payable {
@@ -53,13 +98,71 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
     }
 
     /// @inheritdoc ILiabilityBond
-    function slashAndEscrow(address actor, uint256 amount, uint256 recallId)
+    function lockedOf(address actor) external view returns (uint256) {
+        return _lockedTotal[actor];
+    }
+
+    /// @inheritdoc ILiabilityBond
+    function lotLock(uint256 lotId)
+        external
+        view
+        returns (address owner, uint256 size, uint256 remaining, uint256 unlockAt)
+    {
+        LotLock storage l = _locks[lotId];
+        return (l.owner, l.size, l.remaining, l.unlockAt);
+    }
+
+    // --- per-lot locks ---
+
+    /// @inheritdoc ILiabilityBond
+    function lockForLot(address actor, uint256 lotId, uint256 quantity) external onlyLotRegistry {
+        require(_locks[lotId].owner == address(0), "already locked");
+        uint256 amount = bondPerUnit * quantity;
+        require(_bonds[actor] >= amount, "insufficient bond");
+        _bonds[actor] -= amount;
+        _lockedTotal[actor] += amount;
+        uint256 unlockAt = block.timestamp + liabilityPeriod;
+        _locks[lotId] = LotLock({owner: actor, size: amount, remaining: amount, unlockAt: unlockAt});
+        emit BondLocked(actor, lotId, amount, unlockAt);
+    }
+
+    /// @inheritdoc ILiabilityBond
+    function releaseLot(uint256 lotId) external {
+        LotLock storage l = _locks[lotId];
+        require(l.remaining > 0, "nothing locked");
+        require(block.timestamp >= l.unlockAt, "liability period active");
+        uint256 amount = l.remaining;
+        l.remaining = 0;
+        _lockedTotal[l.owner] -= amount;
+        _bonds[l.owner] += amount;
+        emit BondReleased(l.owner, lotId, amount);
+    }
+
+    // --- recall settlement (RecallEngine only) ---
+
+    /// @inheritdoc ILiabilityBond
+    function slashForLot(address actor, uint256 lotId, uint256 recallId)
         external
         onlyRecallEngine
         returns (uint256 slashed)
     {
-        slashed = amount > _bonds[actor] ? _bonds[actor] : amount; // cap at available bond
-        _bonds[actor] -= slashed;
+        LotLock storage l = _locks[lotId];
+        uint256 target = l.size;
+
+        // 1. Take from the lock posted for this lot.
+        uint256 fromLock = l.remaining < target ? l.remaining : target;
+        if (fromLock > 0) {
+            l.remaining -= fromLock;
+            _lockedTotal[l.owner] -= fromLock;
+        }
+
+        // 2. If the lock was already released (recall after the liability period), fall
+        //    back to the producer's free bond, capped at what is available.
+        uint256 rest = target - fromLock;
+        uint256 fromFree = rest > _bonds[actor] ? _bonds[actor] : rest;
+        _bonds[actor] -= fromFree;
+
+        slashed = fromLock + fromFree;
         _escrow[recallId] += slashed;
         emit BondSlashed(actor, slashed, recallId);
     }
@@ -72,7 +175,10 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
     {
         require(holders.length == weights.length, "length mismatch");
         uint256 pot = _escrow[recallId];
-        require(pot > 0, "no escrow");
+        if (pot == 0 || holders.length == 0) {
+            emit PayoutDistributed(recallId, 0, 0);
+            return;
+        }
 
         uint256 totalWeight;
         for (uint256 i = 0; i < weights.length; i++) {
@@ -82,16 +188,14 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
 
         _escrow[recallId] = 0; // effects before interactions
         uint256 distributed;
+        uint256 last = holders.length - 1;
         for (uint256 i = 0; i < holders.length; i++) {
-            uint256 share = (pot * weights[i]) / totalWeight;
-            if (share == 0) continue;
+            // The last entry absorbs rounding dust so exactly `pot` leaves escrow.
+            uint256 share = i == last ? pot - distributed : (pot * weights[i]) / totalWeight;
             distributed += share;
-            (bool ok, ) = holders[i].call{value: share}("");
-            require(ok, "payout failed");
+            if (share > 0) _send(recallId, holders[i], share);
         }
         emit PayoutDistributed(recallId, distributed, holders.length);
-        // NOTE: integer-division dust (pot - distributed) stays in the contract;
-        //       a treasury sweep is left for a later phase.
     }
 
     /// @inheritdoc ILiabilityBond
@@ -101,7 +205,6 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
         returns (uint256 amount)
     {
         amount = _escrow[recallId];
-        require(amount > 0, "no escrow");
         _escrow[recallId] = 0;
         _bonds[to] += amount; // credited back to free bond; the actor may withdraw it
         emit BondRefunded(to, amount, recallId);
@@ -115,9 +218,41 @@ contract LiabilityBond is ILiabilityBond, Ownable, ReentrancyGuard {
     {
         require(_escrow[recallId] >= amount, "escrow underflow");
         _escrow[recallId] -= amount; // effects before interaction
-        (bool ok, ) = to.call{value: amount}("");
-        require(ok, "pay failed");
-        emit ClaimPaid(recallId, to, amount);
+        _send(recallId, to, amount);
+    }
+
+    /// @inheritdoc ILiabilityBond
+    function escrowOf(uint256 recallId) external view returns (uint256) {
+        return _escrow[recallId];
+    }
+
+    // --- credited payouts ---
+
+    /// @inheritdoc ILiabilityBond
+    function claimableOf(address holder) external view returns (uint256) {
+        return _claimable[holder];
+    }
+
+    /// @inheritdoc ILiabilityBond
+    function withdrawClaimable() external nonReentrant {
+        uint256 amount = _claimable[msg.sender];
+        require(amount > 0, "nothing claimable");
+        _claimable[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "transfer failed");
+        emit ClaimableWithdrawn(msg.sender, amount);
+    }
+
+    /// @dev Push `amount` to `to`; if the transfer fails, credit it for later withdrawal
+    ///      so one rejecting holder cannot block settlement for everyone else.
+    function _send(uint256 recallId, address to, uint256 amount) private {
+        (bool ok, ) = to.call{value: amount, gas: PAYOUT_GAS}("");
+        if (ok) {
+            emit ClaimPaid(recallId, to, amount);
+        } else {
+            _claimable[to] += amount;
+            emit PayoutCredited(recallId, to, amount);
+        }
     }
 
     receive() external payable {}

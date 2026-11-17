@@ -89,6 +89,16 @@ contract DisputeModule is IDisputeModule, Ownable {
     }
 
     /// @inheritdoc IDisputeModule
+    function getDispute(uint256 recallId)
+        external
+        view
+        returns (address accused, uint256 deadline, bool challenged, bool resolved, bool upheld)
+    {
+        Dispute storage d = _disputes[recallId];
+        return (d.accused, d.deadline, d.challenged, d.resolved, d.upheld);
+    }
+
+    /// @inheritdoc IDisputeModule
     function isUpheld(uint256 recallId) external view returns (bool) {
         Dispute storage d = _disputes[recallId];
         if (d.resolved) return d.upheld;              // arbiter ruling

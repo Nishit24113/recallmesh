@@ -10,6 +10,8 @@ motivates the planned Merkle-membership path for large graphs.
 - **traversalGas** — gas for `LotRegistry.affectedDescendants(root, maxNodes)` (the DAG walk).
 - **recallGas** — gas for the full `RecallEngine.initiateRecall(...)` (traversal + quarantine
   loop + slash + open dispute).
+- **finalizeGas** — gas for `RecallEngine.finalizeRecall(...)`, which recomputes the affected set,
+  builds the pro-rata payout table on-chain and pays one entry per affected lot.
 
 Configs live in [`configs.json`](configs.json): chains (fan-out 1) and balanced 2/3/4-ary trees
 at increasing depth.

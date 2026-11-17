@@ -10,21 +10,26 @@ import {ILotRegistry} from "./interfaces/ILotRegistry.sol";
 import {ILiabilityBond} from "./interfaces/ILiabilityBond.sol";
 import {IDisputeModule} from "./interfaces/IDisputeModule.sol";
 import {IActorRegistry} from "./interfaces/IActorRegistry.sol";
-import {Recall, RecallState, LotStatus} from "./interfaces/Types.sol";
+import {Recall, RecallState, RecallMode, LotStatus} from "./interfaces/Types.sol";
 
 /**
  * @title RecallEngine
  * @notice The heart of RecallMesh: it ties liability to provenance-graph topology.
- *         Given an EIP-712 recall signed by the authorised oracle (regulator/lab),
- *         it (1) verifies the signature, (2) computes the affected descendant set
- *         over the DAG and quarantines those lots, (3) slashes the at-fault actor's
- *         bond into escrow, and (4) opens a dispute window. On finalisation it pays
- *         downstream holders pro-rata.
- * @dev Draft: `holders`/`weights` for payout are computed off-chain from the
- *      LotsQuarantined event + ERC-1155 balances and passed to finalizeRecall;
- *      a dispute that overturns the attribution should refund instead of pay out
- *      (marked TODO). Bond-sizing (`slashAmount`) is a placeholder pending the
- *      game-theoretic analysis in the report.
+ *         Given an EIP-712 recall signed by the authorised oracle (regulator/lab) that
+ *         names a root lot and the IPFS CID of the lab certificate, it
+ *         (1) verifies the signature,
+ *         (2) derives the at-fault actor from the graph: the producer of the root lot,
+ *         (3) computes the affected descendant set and quarantines it,
+ *         (4) slashes the bond that producer locked for the root lot into escrow, and
+ *         (5) opens a dispute window.
+ *         Once the dispute resolves, `finalizeRecall` pays downstream holders pro-rata
+ *         (amounts computed on-chain from ERC-1155 balances) or refunds the accused if
+ *         the attribution was overturned.
+ *
+ *         Two modes:
+ *         - Eager: on-chain BFS + quarantine loop (simple, for small graphs/demo).
+ *         - Merkle: the oracle commits Merkle roots of the affected set and payout table;
+ *           initiation is O(1) and quarantine/payout are permissionless O(log n) proofs.
  */
 contract RecallEngine is IRecallEngine, EIP712, Ownable {
     ILotRegistry public lots;
@@ -32,27 +37,27 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
     IDisputeModule public disputes;
     IActorRegistry public actors;
 
-    address public oracle;                 // authorised regulator/lab signer
+    address public oracle; // authorised regulator/lab signer
     uint256 public challengeWindow = 3 days;
-    uint256 public slashAmount = 1 ether;  // TODO: parameterise bond sizing (see report)
 
     uint256 private _nextRecallId = 1;
     mapping(uint256 => Recall) private _recalls;
+    // Eager mode: traversal cap used at initiation. The affected set is recomputed from the
+    // DAG at finalize instead of stored (saves one SSTORE per lot): it cannot change in
+    // between, because createLot rejects frozen parents and every affected lot is frozen.
+    mapping(uint256 => uint256) private _maxNodes;
 
-    /// @dev EIP-712 typed-data hash of a recall authorisation (eager, on-chain-traversal mode).
+    /// @dev EIP-712 typed data for an eager (on-chain traversal) recall.
     bytes32 private constant RECALL_TYPEHASH =
-        keccak256("Recall(uint256 rootLotId,address atFaultActor,uint256 maxNodes)");
+        keccak256("Recall(uint256 rootLotId,uint256 maxNodes,string certificateCID)");
 
-    // --- Scalable Merkle-anchored mode (O(1) initiation; O(log n) pull operations) ---
-    // The oracle commits off-chain-computed Merkle roots of (a) the affected-descendant set
-    // and (b) the pro-rata payout table. Quarantine and payout then happen per lot via
-    // membership proofs, which removes the on-chain traversal/loop (the gas cliff) and makes
-    // payouts pull-based (no reentrancy/push-loop risk).
+    /// @dev EIP-712 typed data for a Merkle-anchored recall.
     bytes32 private constant RECALL_MERKLE_TYPEHASH = keccak256(
-        "RecallMerkle(uint256 rootLotId,address atFaultActor,bytes32 quarantineRoot,bytes32 payoutRoot,uint256 totalWeight)"
+        "RecallMerkle(uint256 rootLotId,bytes32 quarantineRoot,bytes32 payoutRoot,uint256 totalWeight,string certificateCID)"
     );
-    mapping(uint256 => bytes32) private _quarantineRoot;   // recallId => Merkle root of affected lot ids
-    mapping(uint256 => bytes32) private _payoutRoot;       // recallId => Merkle root of (lotId,holder,weight)
+
+    mapping(uint256 => bytes32) private _quarantineRoot;    // recallId => root of affected lot ids
+    mapping(uint256 => bytes32) private _payoutRoot;        // recallId => root of (lotId,holder,weight)
     mapping(uint256 => uint256) private _payoutTotalWeight; // recallId => sum of weights
     mapping(uint256 => mapping(uint256 => bool)) private _lotQuarantined; // recallId => lotId => done
     mapping(uint256 => mapping(bytes32 => bool)) private _claimed;        // recallId => leafKey => claimed
@@ -83,66 +88,93 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
         challengeWindow = window;
     }
 
+    // ------------------------------------------------------------------
+    //  Eager recall path
+    // ------------------------------------------------------------------
+
     /// @inheritdoc IRecallEngine
     function initiateRecall(
         uint256 rootLotId,
-        address atFaultActor,
         uint256 maxNodes,
+        string calldata certificateCID,
         bytes calldata oracleSig
     ) external returns (uint256 recallId) {
         // 1. Verify the recall was authorised by the trusted oracle (EIP-712).
-        bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(RECALL_TYPEHASH, rootLotId, atFaultActor, maxNodes))
+        bytes32 structHash = keccak256(
+            abi.encode(RECALL_TYPEHASH, rootLotId, maxNodes, keccak256(bytes(certificateCID)))
         );
-        require(ECDSA.recover(digest, oracleSig) == oracle, "bad oracle sig");
+        _verifyOracle(structHash, oracleSig);
 
-        recallId = _nextRecallId++;
-        _recalls[recallId] = Recall({
-            id: recallId,
-            rootLotId: rootLotId,
-            atFaultActor: atFaultActor,
-            state: RecallState.Initiated,
-            initiatedAt: block.timestamp,
-            slashed: 0
-        });
+        // 2-4. Attribute by graph position, mark the root recalled, slash, open dispute.
+        recallId = _open(rootLotId, RecallMode.Eager, certificateCID);
 
-        // 2. Compute the affected descendant set over the provenance DAG and quarantine it.
-        lots.setStatus(rootLotId, LotStatus.Recalled);
+        // 3. Compute the affected descendant set over the DAG and quarantine it.
         uint256[] memory affected = lots.affectedDescendants(rootLotId, maxNodes);
         for (uint256 i = 0; i < affected.length; i++) {
-            lots.setStatus(affected[i], LotStatus.Quarantined);
+            if (lots.statusOf(affected[i]) != LotStatus.Recalled) {
+                lots.setStatus(affected[i], LotStatus.Quarantined);
+            }
         }
+        _maxNodes[recallId] = maxNodes;
         emit LotsQuarantined(recallId, affected.length);
-
-        // 3. Slash the at-fault actor's bond into escrow for downstream payout.
-        uint256 slashed = bond.slashAndEscrow(atFaultActor, slashAmount, recallId);
-        _recalls[recallId].slashed = slashed;
-
-        // 4. Open the challenge window before settlement is final.
-        disputes.openDispute(recallId, atFaultActor, challengeWindow);
-
-        emit RecallInitiated(recallId, rootLotId, atFaultActor);
     }
 
     /// @inheritdoc IRecallEngine
-    function finalizeRecall(
-        uint256 recallId,
-        address[] calldata holders,
-        uint256[] calldata weights
-    ) external {
+    function finalizeRecall(uint256 recallId) external {
         Recall storage r = _recalls[recallId];
         require(r.state == RecallState.Initiated, "bad state");
         require(disputes.isResolved(recallId), "dispute unresolved");
 
-        if (disputes.isUpheld(recallId)) {
-            // Attribution stands: pay the slashed collateral to downstream holders.
-            bond.distributePayout(recallId, holders, weights);
-        } else {
+        if (!disputes.isUpheld(recallId)) {
             // Attribution overturned on dispute: refund the slashed bond to the accused.
             bond.refundEscrow(recallId, r.atFaultActor);
+        } else {
+            // Merkle recalls settle through per-holder claimPayout proofs.
+            require(r.mode == RecallMode.Eager, "use claimPayout");
+            (address[] memory holders, uint256[] memory weights) = _eagerPayouts(r);
+            if (holders.length == 0) {
+                // No innocent downstream holder was harmed; return the collateral.
+                bond.refundEscrow(recallId, r.atFaultActor);
+            } else {
+                bond.distributePayout(recallId, holders, weights);
+            }
         }
         r.state = RecallState.Finalized;
         emit RecallFinalized(recallId, r.slashed);
+    }
+
+    /// @dev Pro-rata table for an eager recall, computed on-chain: one entry per
+    ///      (affected lot, holder) with a non-zero balance, excluding the at-fault actor.
+    function _eagerPayouts(Recall storage r)
+        internal
+        view
+        returns (address[] memory holders, uint256[] memory weights)
+    {
+        address atFault = r.atFaultActor;
+        uint256[] memory affected = lots.affectedDescendants(r.rootLotId, _maxNodes[r.id]);
+        address[][] memory hs = new address[][](affected.length);
+        uint256[][] memory bs = new uint256[][](affected.length);
+
+        uint256 n;
+        for (uint256 i = 0; i < affected.length; i++) {
+            (hs[i], bs[i]) = lots.holdingsOf(affected[i]);
+            for (uint256 j = 0; j < hs[i].length; j++) {
+                if (bs[i][j] > 0 && hs[i][j] != atFault) n++;
+            }
+        }
+
+        holders = new address[](n);
+        weights = new uint256[](n);
+        uint256 k;
+        for (uint256 i = 0; i < affected.length; i++) {
+            for (uint256 j = 0; j < hs[i].length; j++) {
+                if (bs[i][j] > 0 && hs[i][j] != atFault) {
+                    holders[k] = hs[i][j];
+                    weights[k] = bs[i][j];
+                    k++;
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -155,54 +187,46 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
     ///         the size of the affected set.
     function initiateRecallMerkle(
         uint256 rootLotId,
-        address atFaultActor,
         bytes32 quarantineRoot_,
         bytes32 payoutRoot_,
         uint256 totalWeight_,
+        string calldata certificateCID,
         bytes calldata oracleSig
     ) external returns (uint256 recallId) {
-        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(
-            RECALL_MERKLE_TYPEHASH, rootLotId, atFaultActor, quarantineRoot_, payoutRoot_, totalWeight_
-        )));
-        require(ECDSA.recover(digest, oracleSig) == oracle, "bad oracle sig");
+        bytes32 structHash = keccak256(abi.encode(
+            RECALL_MERKLE_TYPEHASH,
+            rootLotId,
+            quarantineRoot_,
+            payoutRoot_,
+            totalWeight_,
+            keccak256(bytes(certificateCID))
+        ));
+        _verifyOracle(structHash, oracleSig);
         require(totalWeight_ > 0, "no weight");
 
-        recallId = _nextRecallId++;
-        _recalls[recallId] = Recall({
-            id: recallId,
-            rootLotId: rootLotId,
-            atFaultActor: atFaultActor,
-            state: RecallState.Initiated,
-            initiatedAt: block.timestamp,
-            slashed: 0
-        });
+        recallId = _open(rootLotId, RecallMode.Merkle, certificateCID); // descendants: lazily, by proof
         _quarantineRoot[recallId] = quarantineRoot_;
         _payoutRoot[recallId] = payoutRoot_;
         _payoutTotalWeight[recallId] = totalWeight_;
-
-        lots.setStatus(rootLotId, LotStatus.Recalled); // descendants quarantined lazily via proofs
-        uint256 slashed = bond.slashAndEscrow(atFaultActor, slashAmount, recallId);
-        _recalls[recallId].slashed = slashed;
-        disputes.openDispute(recallId, atFaultActor, challengeWindow);
-        emit RecallInitiated(recallId, rootLotId, atFaultActor);
     }
 
     /// @notice Quarantine one affected lot by proving its membership in the recall's
     ///         affected-set Merkle root. Permissionless and O(log n) per lot.
     function quarantineWithProof(uint256 recallId, uint256 lotId, bytes32[] calldata proof) external {
-        require(_recalls[recallId].id != 0, "no recall");
+        require(_recalls[recallId].mode == RecallMode.Merkle && _recalls[recallId].id != 0, "not a merkle recall");
         require(!_lotQuarantined[recallId][lotId], "already quarantined");
         // leaf hashing matches OpenZeppelin StandardMerkleTree (double keccak of the ABI-encoded tuple)
         bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(lotId))));
         require(MerkleProof.verify(proof, _quarantineRoot[recallId], leaf), "bad proof");
         _lotQuarantined[recallId][lotId] = true;
-        lots.setStatus(lotId, LotStatus.Quarantined);
+        if (lots.statusOf(lotId) != LotStatus.Recalled) {
+            lots.setStatus(lotId, LotStatus.Quarantined);
+        }
         emit LotQuarantinedMerkle(recallId, lotId);
     }
 
-    /// @notice Pull-based pro-rata payout: a downstream holder claims their share of the
-    ///         slashed collateral by proving their (lotId, holder, weight) entry. O(log n),
-    ///         single transfer, so no push-loop or reentrancy exposure.
+    /// @notice Pull-based pro-rata payout: anyone may submit a holder's (lotId, holder,
+    ///         weight) entry with its proof; the share always goes to `holder`. O(log n).
     function claimPayout(
         uint256 recallId,
         uint256 lotId,
@@ -211,17 +235,26 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
         bytes32[] calldata proof
     ) external {
         Recall storage r = _recalls[recallId];
-        require(r.id != 0, "no recall");
+        require(r.id != 0 && r.mode == RecallMode.Merkle, "not a merkle recall");
         require(disputes.isResolved(recallId), "dispute unresolved");
         require(disputes.isUpheld(recallId), "attribution overturned");
         bytes32 key = keccak256(abi.encode(lotId, holder, weight));
         require(!_claimed[recallId][key], "already claimed");
-        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(lotId, holder, weight))));
+        bytes32 leaf = keccak256(bytes.concat(key));
         require(MerkleProof.verify(proof, _payoutRoot[recallId], leaf), "bad proof");
         _claimed[recallId][key] = true;
         uint256 share = (r.slashed * weight) / _payoutTotalWeight[recallId];
         if (share > 0) bond.payFromEscrow(recallId, holder, share);
         emit PayoutClaimed(recallId, lotId, holder, share);
+    }
+
+    /// @notice Whether a payout entry has already been claimed.
+    function isClaimed(uint256 recallId, uint256 lotId, address holder, uint256 weight)
+        external
+        view
+        returns (bool)
+    {
+        return _claimed[recallId][keccak256(abi.encode(lotId, holder, weight))];
     }
 
     /// @notice Committed Merkle roots + total weight for a Merkle-anchored recall.
@@ -233,8 +266,57 @@ contract RecallEngine is IRecallEngine, EIP712, Ownable {
         return (_quarantineRoot[recallId], _payoutRoot[recallId], _payoutTotalWeight[recallId]);
     }
 
+    // ------------------------------------------------------------------
+    //  Shared
+    // ------------------------------------------------------------------
+
+    /// @dev Common initiation: attribute fault by graph position (root lot's producer),
+    ///      mark the root Recalled, slash the bond locked for it, and open the dispute.
+    function _open(uint256 rootLotId, RecallMode mode, string calldata certificateCID)
+        internal
+        returns (uint256 recallId)
+    {
+        address atFault = lots.producerOf(rootLotId);
+        require(atFault != address(0), "no lot");
+        require(lots.statusOf(rootLotId) != LotStatus.Recalled, "already recalled");
+
+        recallId = _nextRecallId++;
+        lots.setStatus(rootLotId, LotStatus.Recalled);
+        uint256 slashed = bond.slashForLot(atFault, rootLotId, recallId);
+
+        _recalls[recallId] = Recall({
+            id: recallId,
+            rootLotId: rootLotId,
+            atFaultActor: atFault,
+            state: RecallState.Initiated,
+            mode: mode,
+            initiatedAt: block.timestamp,
+            slashed: slashed,
+            certificateCID: certificateCID
+        });
+
+        disputes.openDispute(recallId, atFault, challengeWindow);
+        emit RecallInitiated(recallId, rootLotId, atFault, certificateCID);
+    }
+
+    function _verifyOracle(bytes32 structHash, bytes calldata sig) internal view {
+        require(ECDSA.recover(_hashTypedDataV4(structHash), sig) == oracle, "bad oracle sig");
+    }
+
     /// @inheritdoc IRecallEngine
     function getRecall(uint256 recallId) external view returns (Recall memory) {
         return _recalls[recallId];
+    }
+
+    /// @inheritdoc IRecallEngine
+    function affectedOf(uint256 recallId) external view returns (uint256[] memory) {
+        Recall storage r = _recalls[recallId];
+        if (r.id == 0 || r.mode != RecallMode.Eager) return new uint256[](0);
+        return lots.affectedDescendants(r.rootLotId, _maxNodes[recallId]);
+    }
+
+    /// @notice Number of recalls initiated so far (ids are 1..recallCount).
+    function recallCount() external view returns (uint256) {
+        return _nextRecallId - 1;
     }
 }

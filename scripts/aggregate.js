@@ -21,7 +21,7 @@ const rows = files
   .map((f) => JSON.parse(fs.readFileSync(path.join(resultsDir, f), "utf8")))
   .sort((a, b) => a.descendants - b.descendants);
 
-const header = ["label", "fanout", "depth", "descendants", "traversalGas", "recallGas", "recallNote"];
+const header = ["label", "fanout", "depth", "descendants", "traversalGas", "recallGas", "finalizeGas", "recallNote"];
 const csv = [header.join(",")]
   .concat(rows.map((r) => header.map((h) => r[h]).join(",")))
   .join("\n");
@@ -30,16 +30,18 @@ fs.writeFileSync(path.join(resultsDir, "summary.csv"), csv + "\n");
 const md = [
   "# RecallMesh — Gas / Scalability Benchmark Results",
   "",
-  "Gas for the recall path as a function of provenance-DAG size. `recallGas` is the full",
+  "Gas for the eager recall path as a function of provenance-DAG size. `recallGas` is the full",
   "`initiateRecall` (traversal + quarantine loop + slash + open dispute); `traversalGas` is the",
-  "`affectedDescendants` view alone. Produced by `scripts/benchmark.js` + `scripts/aggregate.js`.",
+  "`affectedDescendants` view alone; `finalizeGas` is `finalizeRecall`, which computes the pro-rata",
+  "payout table on-chain from ERC-1155 balances and pays one entry per affected lot.",
+  "Produced by `scripts/benchmark.js` + `scripts/aggregate.js`.",
   "",
-  "| Config | Fanout | Depth | Descendants | Traversal gas | Recall gas | Note |",
-  "|---|---|---|---|---|---|---|",
+  "| Config | Fanout | Depth | Descendants | Traversal gas | Recall gas | Finalize gas | Note |",
+  "|---|---|---|---|---|---|---|---|",
 ].concat(
   rows.map(
     (r) =>
-      `| ${r.label} | ${r.fanout} | ${r.depth} | ${r.descendants} | ${r.traversalGas} | ${r.recallGas ?? "-"} | ${r.recallNote} |`
+      `| ${r.label} | ${r.fanout} | ${r.depth} | ${r.descendants} | ${r.traversalGas} | ${r.recallGas ?? "-"} | ${r.finalizeGas ?? "-"} | ${r.recallNote} |`
   )
 );
 const docsDir = path.join(__dirname, "..", "docs");
@@ -47,4 +49,4 @@ fs.mkdirSync(docsDir, { recursive: true });
 fs.writeFileSync(path.join(docsDir, "benchmark_results.md"), md.join("\n") + "\n");
 
 console.log(`Merged ${rows.length} configs -> bench/results/summary.csv and docs/benchmark_results.md`);
-console.log(md.slice(6).join("\n"));
+console.log(md.slice(8).join("\n"));
